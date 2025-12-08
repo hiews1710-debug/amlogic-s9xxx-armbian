@@ -1,0 +1,280 @@
+#==========================================================================
+# Description: Build Armbian server image
+# Copyright (C) 2021 https://github.com/ophub/amlogic-s9xxx-armbian
+#==========================================================================
+
+name: Build Armbian server image for Firefly-RK3399
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      set_release:
+        description: "Select OS Release."
+        required: false
+        default: "bookworm"
+        type: choice
+        options:
+          - bookworm
+          - bullseye
+          - jammy
+          - noble
+      armbian_board:
+        description: "Select device board."
+        required: false
+        default: "firefly-rk3399"
+        type: choice
+        options:
+          - firefly-rk3399
+      armbian_kernel:
+        description: "Select kernel version."
+        required: false
+        default: "5.15.y"
+        type: choice
+        options:
+          - 5.15.y
+          - 6.1.y
+          - 5.10.y
+      auto_kernel:
+        description: "Auto use the latest kernel."
+        required: false
+        default: false
+        type: boolean
+      kernel_repo:
+        description: "Set the kernel repository."
+        required: false
+        default: "ophub/kernel"
+        type: string
+      kernel_usage:
+        description: "Set the tags of the stable kernel."
+        required: false
+        default: "stable"
+        type: choice
+        options:
+          - stable
+          - flippy
+      armbian_fstype:
+        description: "Select armbian rootfs type."
+        required: false
+        default: "ext4"
+        type: choice
+        options:
+          - ext4
+      armbian_storage:
+        description: "Select image storage type."
+        required: false
+        default: "save"
+        type: choice
+        options:
+          - save
+      builder_name:
+        description: "Set Armbian builder signature."
+        required: false
+        default: "ophub"
+        type: string
+
+env:
+  TZ: America/New_York
+  ROOTFS_SCRIPT: compile-kernel/tools/script/docker/build_armbian_rootfs_file.sh
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    if: ${{ github.event.repository.owner.id }} == ${{ github.event.sender.id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialization environment
+        id: init
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          docker rmi $(docker images -q) 2>/dev/null
+          [[ -n "${AGENT_TOOLSDIRECTORY}" ]] && sudo rm -rf "${AGENT_TOOLSDIRECTORY}"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android 2>/dev/null
+          sudo swapoff -a
+          sudo rm -f /swapfile /mnt/swapfile
+          sudo -E apt-get -y update
+          sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
+          sudo -E apt-get -y install $(curl -fsSL https://tinyurl.com/ubuntu2204-build-armbian)
+          sudo -E systemctl daemon-reload
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          sudo sed -i '/NVM_DIR/d;/skel/d' /root/{.bashrc,.profile}
+          sudo rm -rf ~/{.cargo,.dotnet,.rustup}
+          sudo timedatectl set-timezone "${TZ}"
+          echo "status=success" >> ${GITHUB_OUTPUT}
+
+      - name: Create simulated physical disk
+        run: |
+          mnt_size=$(expr $(df -h /mnt | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 1)
+          root_size=$(expr $(df -h / | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 4)
+          sudo truncate -s "${mnt_size}"G /mnt/mnt.img
+          sudo truncate -s "${root_size}"G /root.img
+          sudo losetup /dev/loop6 /mnt/mnt.img
+          sudo losetup /dev/loop7 /root.img
+          sudo pvcreate /dev/loop6
+          sudo pvcreate /dev/loop7
+          sudo vgcreate github /dev/loop6 /dev/loop7
+          sudo lvcreate -n runner -l 100%FREE github
+          sudo mkfs.xfs /dev/github/runner
+          sudo mkdir -p /builder
+          sudo mount /dev/github/runner /builder
+          sudo chown -R runner.runner /builder
+          df -Th
+
+      - name: Download Armbian build source
+        id: down
+        working-directory: /builder
+        if: ${{ steps.init.outputs.status }} == 'success' && !cancelled()
+        run: |
+          df -hT ${PWD}
+          git clone -q --single-branch --depth=1 https://github.com/armbian/build.git build
+          cd build
+          # Use stable branch instead of main for RK3399
+          git checkout v24.05.0-trunk.0382
+          
+          # Apply patches for Firefly-RK3399
+          cat > patches/kernel/archive/rk-5.15/999-firefly-rk3399-fixes.patch << 'EOF'
+          From: Firefly RK3399 Fixes <fixes@firefly.com>
+          Date: $(date +"%a, %d %b %Y %H:%M:%S %z")
+          Subject: Fixes for Firefly RK3399
+
+          --- a/arch/arm64/boot/dts/rockchip/rk3399-firefly.dts
+          +++ b/arch/arm64/boot/dts/rockchip/rk3399-firefly.dts
+          @@ -XXX,XX +XXX,XX @@
+           &pcie_phy {
+           status = "okay";
+           };
+           
+           &pcie0 {
+          -	status = "okay";
+          +	status = "disabled";
+           ep-gpios = <&gpio4 RK_PD1 GPIO_ACTIVE_HIGH>;
+           num-lanes = <4>;
+           max-link-speed = <2>;
+          @@ -XXX,XX +XXX,XX @@
+           &uart2 {
+           status = "okay";
+           };
+          +
+          +&vopb {
+          +	status = "okay";
+          +};
+          +
+          +&vopl {
+          +	status = "okay";
+          +};
+          EOF
+          
+          ln -sf /builder/build ${GITHUB_WORKSPACE}/build
+          ln -sf /builder/build /home/runner/work/_actions/ophub/amlogic-s9xxx-armbian/main/build
+          echo "status=success" >> ${GITHUB_OUTPUT}
+
+      - name: Compile Armbian for Firefly-RK3399 [ ${{ inputs.set_release }} ]
+        id: compile
+        working-directory: /builder/build
+        if: ${{ steps.down.outputs.status }} == 'success' && !cancelled()
+        run: |
+          # Clean previous builds
+          ./compile.sh CLEAN_LEVEL="make,debs"
+          
+          # Build Armbian for Firefly-RK3399 with specific settings
+          # Using kernel 5.15.y for better RK3399 compatibility
+          ./compile.sh \
+            BOARD=firefly-rk3399 \
+            BRANCH=current \
+            RELEASE=${{ inputs.set_release }} \
+            KERNEL_ONLY=no \
+            KERNEL_CONFIGURE=no \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=yes \
+            EXPERT=yes \
+            COMPRESS_OUTPUTIMAGE=img \
+            ROOTFSTYPE=ext4 \
+            KERNEL_GIT=shallow \
+            BSPFREEZE=yes \
+            USE_TORRENT=no \
+            CACHE_DIR=/builder/cache \
+            EXTERNAL=no \
+            INSTALL_HEADERS=no \
+            CREATE_PATCHES=no
+          
+          echo "status=success" >> ${GITHUB_OUTPUT}
+
+      - name: Organize files and clear space
+        id: clean
+        if: ${{ steps.compile.outputs.status }} == 'success' && !cancelled()
+        run: |
+          # Find and organize the built image
+          cd /builder/build/output/images
+          IMAGE_FILE=$(ls -t Armbian*.img 2>/dev/null | head -1)
+          
+          if [ -n "$IMAGE_FILE" ]; then
+            echo "Found image: $IMAGE_FILE"
+            # Compress the image
+            gzip -9 "$IMAGE_FILE"
+            COMPRESSED_FILE="${IMAGE_FILE}.gz"
+            
+            # Create output directory
+            mkdir -p ${GITHUB_WORKSPACE}/output
+            mv "$COMPRESSED_FILE" ${GITHUB_WORKSPACE}/output/
+            
+            # Generate SHA256 checksum
+            cd ${GITHUB_WORKSPACE}/output
+            sha256sum *.gz > sha256sum.txt
+            
+            echo "build_tag=Armbian_${{ inputs.set_release }}_firefly-rk3399_$(date +"%Y.%m.%d")" >> ${GITHUB_OUTPUT}
+            echo "status=success" >> ${GITHUB_OUTPUT}
+          else
+            echo "ERROR: No image file found!" >&2
+            echo "status=failed" >> ${GITHUB_OUTPUT}
+            exit 1
+          fi
+          
+          # Clean up builder space
+          rm -rf /builder/build/{cache,output} 2>/dev/null || true
+          df -hT ${PWD}
+
+      - name: Upload Armbian image to Release
+        uses: ncipollo/release-action@main
+        if: ${{ steps.clean.outputs.status == 'success' && !cancelled() }}
+        with:
+          tag: ${{ steps.clean.outputs.build_tag }}
+          artifacts: output/*
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ### Armbian for Firefly-RK3399
+            - **OS**: ${{ inputs.set_release }}
+            - **Kernel**: 5.15.y (recommended for RK3399 stability)
+            - **Board**: Firefly-RK3399
+            
+            ### Default Credentials
+            - **Username**: root
+            - **Password**: 1234
+            
+            ### Important Notes for Firefly-RK3399:
+            1. This build disables PCIe by default to avoid link training issues
+            2. Uses kernel 5.15.y for best compatibility
+            3. If you need PCIe, enable it in device tree: `/boot/dtb/rockchip/rk3399-firefly.dts`
+            
+            ### Installation:
+            ```bash
+            # Write to SD card or eMMC
+            sudo dd if=Armbian_*.img.gz | gunzip | sudo dd of=/dev/sdX bs=4M status=progress
+            ```
+            
+            ### Verification:
+            See included sha256sum.txt
+
+      - name: Cleanup workspace
+        if: always()
+        run: |
+          sudo umount /builder 2>/dev/null || true
+          sudo vgremove -f github 2>/dev/null || true
+          sudo pvremove /dev/loop6 /dev/loop7 2>/dev/null || true
+          sudo losetup -d /dev/loop6 /dev/loop7 2>/dev/null || true
+          sudo rm -f /mnt/mnt.img /root.img 2>/dev/null || true
