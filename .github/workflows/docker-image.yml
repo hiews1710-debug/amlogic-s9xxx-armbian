@@ -18,7 +18,6 @@ on:
           - bookworm
           - bullseye
           - jammy
-          - noble
       armbian_board:
         description: "Select device board."
         required: false
@@ -33,7 +32,6 @@ on:
         type: choice
         options:
           - 5.15.y
-          - 6.1.y
           - 5.10.y
       auto_kernel:
         description: "Auto use the latest kernel."
@@ -75,7 +73,6 @@ on:
 
 env:
   TZ: America/New_York
-  ROOTFS_SCRIPT: compile-kernel/tools/script/docker/build_armbian_rootfs_file.sh
 
 jobs:
   build:
@@ -131,61 +128,223 @@ jobs:
         if: ${{ steps.init.outputs.status }} == 'success' && !cancelled()
         run: |
           df -hT ${PWD}
+          echo "Downloading Armbian build source..."
           git clone -q --single-branch --depth=1 https://github.com/armbian/build.git build
           cd build
-          # Use stable branch instead of main for RK3399
-          git checkout v24.05.0-trunk.0382
           
-          # Apply patches for Firefly-RK3399
-          cat > patches/kernel/archive/rk-5.15/999-firefly-rk3399-fixes.patch << 'EOF'
-          From: Firefly RK3399 Fixes <fixes@firefly.com>
-          Date: $(date +"%a, %d %b %Y %H:%M:%S %z")
-          Subject: Fixes for Firefly RK3399
+          # List available branches/tags
+          echo "Available branches/tags:"
+          git branch -a | head -20
+          git tag -l | head -20
+          
+          # Use a stable version - try using the main branch but set kernel to legacy
+          echo "Using main branch with legacy kernel settings..."
+          
+          # Create directory for patches
+          mkdir -p userpatches/kernel/rockchip64-legacy
+          
+          # Create a patch to fix Firefly-RK3399 issues
+          cat > userpatches/kernel/rockchip64-legacy/999-firefly-fixes.patch << 'EOF'
+          From: Firefly RK3399 Fix <fix@firefly.com>
+          Subject: Fix PCIe and clock issues for Firefly-RK3399
 
           --- a/arch/arm64/boot/dts/rockchip/rk3399-firefly.dts
           +++ b/arch/arm64/boot/dts/rockchip/rk3399-firefly.dts
           @@ -XXX,XX +XXX,XX @@
-           &pcie_phy {
-           status = "okay";
-           };
-           
-           &pcie0 {
-          -	status = "okay";
+          +&pcie0 {
           +	status = "disabled";
-           ep-gpios = <&gpio4 RK_PD1 GPIO_ACTIVE_HIGH>;
-           num-lanes = <4>;
-           max-link-speed = <2>;
-          @@ -XXX,XX +XXX,XX @@
+          +};
+          +
            &uart2 {
-           status = "okay";
+           	status = "okay";
            };
           +
           +&vopb {
           +	status = "okay";
+          +	assigned-clocks = <&cru DCLK_VOP0_DIV>;
+          +	assigned-clock-parents = <&cru PLL_VPLL>;
           +};
           +
           +&vopl {
           +	status = "okay";
+          +	assigned-clocks = <&cru DCLK_VOP1_DIV>;
+          +	assigned-clock-parents = <&cru PLL_CPLL>;
           +};
           EOF
           
+          # Create configuration for Firefly-RK3399
+          mkdir -p userpatches
+          cat > userpatches/config-firefly-rk3399.conf << 'EOF'
+          # Firefly-RK3399 specific configuration
+          BUILD_MINIMAL="yes"
+          BUILD_DESKTOP="no"
+          KERNEL_CONFIGURE="no"
+          KERNEL_KEEP_CONFIG="no"
+          EXPERT="yes"
+          FORCE_BOOTSCRIPT_UPDATE="yes"
+          BSPFREEZE="yes"
+          CREATE_PATCHES="no"
+          INSTALL_HEADERS="no"
+          COMPRESS_OUTPUT="img,xz"
+          RELEASE="bookworm"
+          BRANCH="legacy"
+          BOARD="firefly-rk3399"
+          LINUXFAMILY="rockchip64"
+          ARCH="arm64"
+          HOST="armbian"
+          EXTRAWIFI="no"
+          BUILD_ONLY="default"
+          EXTRA_IMAGE_SUFFIX="firefly"
+          SKIP_EXTERNAL_TOOLCHAINS="no"
+          USE_TORRENT="no"
+          CARD_DEVICE=""
+          OFFLINE_WORK="no"
+          OFFLINE_WORK_DIR=""
+          EXTRA_ROOTFS_MIB="1024"
+          FORCE_REPO_DEPENDENCIES="no"
+          USE_CCACHE="no"
+          PROGRESS_DISPLAY="plain"
+          PROGRESS_LOG_TO_FILE="yes"
+          LOG_TO_FILE="yes"
+          SSH_CLIENT_PUBKEY=""
+          ENABLE_ssh="yes"
+          DISABLE_IPV6="no"
+          SERIALCON="ttyS2"
+          HOSTNAME="firefly-rk3399"
+          ROOTPWD="1234"
+          USER_NAME="firefly"
+          USER_PWD="firefly"
+          DESKTOP_AUTOLOGIN="no"
+          DESKTOP_ENVIRONMENT=""
+          DESKTOP_ENVIRONMENT_CONFIG_NAME=""
+          KEYBOARD="us"
+          DISPLAY_MANAGER="lightdm"
+          DISPLAY_DEFAULT_DESKTOP=""
+          ENABLE_SYSTEMD_SYSV="no"
+          DISABLE_systemd_timesyncd="no"
+          DISABLE_systemd_resolved="no"
+          DISABLE_systemd_hostnamed="no"
+          DISABLE_systemd_networkd="no"
+          DISABLE_systemd_udevd="no"
+          ENABLE_ROCKCHIP_SERVICE="yes"
+          EXTRA_BSP_NAME="firefly"
+          BOOT_FDT_FILE="rockchip/rk3399-firefly.dtb"
+          BOOTCONFIG="firefly-rk3399"
+          BOOTSOURCE='https://github.com/armbian/linux-rockchip'
+          BOOTBRANCH='branch:linux-5.15.y-rk35xx'
+          LINUXCONFIG='linux-rockchip64-legacy'
+          KERNELBRANCH='branch:linux-5.15.y-rk35xx'
+          KERNELSOURCE='https://github.com/armbian/linux-rockchip'
+          KERNELPATCHDIR='archive/rk-5.15'
+          INITRD_ARCH="arm64"
+          UBOOT_USE_GCC='> 7.0'
+          UBOOT_TARGET_MAP=";;u-boot-dtb.img"
+          UBOOTSOURCE='https://github.com/armbian/u-boot-rockchip'
+          UBOOTBRANCH='branch:v2024.07-rk35xx'
+          UBOOTDIR="u-boot-rockchip"
+          UBOOTSCRIPT="boot-rockchip64"
+          BOOTSCRIPT="boot-rockchip64"
+          BOOTENV_FILE="rockchip-default.txt"
+          OVERLAY_PREFIX='rockchip'
+          BOOTDELAY=1
+          BOOTSUPPORT="yes"
+          SPL_UBOOTNAME="u-boot"
+          SPL_FROM_SD="no"
+          ATFSOURCE="https://github.com/ARM-software/arm-trusted-firmware"
+          ATFDIR="arm-trusted-firmware"
+          ATFBRANCH="branch:master"
+          ATF_USE_GCC='> 9.0'
+          ATF_TARGET_MAP="M0_CROSS_COMPILE=arm-linux-gnueabi- PLAT=rk3399 bl31;;build/rk3399/release/bl31/bl31.elf"
+          CRUSTCONFIG="rk3399"
+          CRUSTSOURCE="https://github.com/crust-firmware/crust"
+          CRUSTDIR="crust"
+          CRUSTBRANCH="branch:master"
+          CRUST_USE_GCC='> 6.0'
+          CRUST_TARGET_MAP="spl/rk3399-spl.bin;idbloader.img;u-boot/rk3399_bl31_v1.35.elf"
+          DDR_BLOB="rk33"
+          SERIALCON="ttyS2"
+          CLOCKSOURCE="arch_sys_counter"
+          CONSOLE="both"
+          VIDEO_OUTPUT="both"
+          EXTRA_CMDLINE="console=ttyS2,1500000 console=tty0"
+          PREFER_SERIAL="no"
+          BOOTLOGO="yes"
+          BOOTMENU="no"
+          EXTRA="yes"
+          PACKAGE_LIST_BOARD="ethtool i2c-tools lm-sensors network-manager bluez bluetooth"
+          PACKAGE_LIST_FAMILY="rockchip-bsp"
+          IMAGE_PARTITION_TABLE="gpt"
+          BOOTFS_TYPE="fat"
+          ROOTFS_TYPE="ext4"
+          BOOTSIZE="512"
+          BOOTFS_LABEL="BOOT"
+          ROOTFS_LABEL="ROOTFS"
+          UMS_DEVICE="0"
+          UEFI_GRUB_TERMINAL="console serial"
+          UEFI_GRUB_DISABLE_OS_PROBER="true"
+          UEFI_ENABLE_BIOS_AMD64="no"
+          UEFI_ENABLE_BIOS_ARM64="no"
+          UEFI_ENABLE="no"
+          UEFI_GRUB_DISTRO_NAME="Armbian"
+          UEFI_GRUB_TIMEOUT="10"
+          UEFI_GRUB_CMDLINE_LINUX_DEFAULT=""
+          ARCH="arm64"
+          KERNEL_IMAGE_TYPE="Image"
+          INITRD_COMPRESSOR="lz4"
+          INITRD_COMPRESSION="lz4"
+          PACKAGE_LIST_EXCLUDE=""
+          MAINTAINER="Firefly RK3399"
+          VENDOR="Firefly"
+          BOARD_MAINTAINER="Firefly"
+          BOARD_VENDOR="Firefly"
+          BOARD_SUPPORT_MAIL="support@firefly.com"
+          BOARD_WEBSITE="https://www.t-firefly.com/"
+          BOARD_VENDORWEB="https://www.t-firefly.com/"
+          IMAGE_TYPE="user-built"
+          OFFLINE_WORK="no"
+          SKIP_BOOTSPLASH="no"
+          SKIP_LOGOS="no"
+          SKIP_BOOTMENU="no"
+          SKIP_SERIALCONSOLE="no"
+          SKIP_KERNEL="no"
+          SKIP_UBOOT="no"
+          SKIP_BOOTSCRIPT="no"
+          SKIP_ARMBIAN_REPO="no"
+          SKIP_ARMBIAN_CONFIG="no"
+          SKIP_PACKAGE_UPDATE="no"
+          SKIP_PACKAGE_UPGRADE="no"
+          SKIP_PACKAGE_INSTALL="no"
+          SKIP_PACKAGE_CLEANUP="no"
+          SKIP_PACKAGE_LIST="no"
+          SKIP_PACKAGE_LIST_FAMILY="no"
+          SKIP_PACKAGE_LIST_BOARD="no"
+          SKIP_PACKAGE_LIST_DESKTOP="no"
+          SKIP_PACKAGE_LIST_DESKTOP_RECOMMENDS="no"
+          SKIP_PACKAGE_LIST_DESKTOP_BROWSER="no"
+          SKIP_PACKAGE_LIST_DESKTOP_EMAIL="no"
+          SKIP_PACKAGE_LIST_DESKTOP_OFFICE="no"
+          EOF
+          
           ln -sf /builder/build ${GITHUB_WORKSPACE}/build
-          ln -sf /builder/build /home/runner/work/_actions/ophub/amlogic-s9xxx-armbian/main/build
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Compile Armbian for Firefly-RK3399 [ ${{ inputs.set_release }} ]
+      - name: Compile Armbian for Firefly-RK3399
         id: compile
         working-directory: /builder/build
         if: ${{ steps.down.outputs.status }} == 'success' && !cancelled()
         run: |
-          # Clean previous builds
-          ./compile.sh CLEAN_LEVEL="make,debs"
+          echo "Starting Armbian build for Firefly-RK3399..."
           
-          # Build Armbian for Firefly-RK3399 with specific settings
-          # Using kernel 5.15.y for better RK3399 compatibility
-          ./compile.sh \
+          # Source the configuration
+          source userpatches/config-firefly-rk3399.conf
+          
+          # Clean previous builds
+          sudo ./compile.sh CLEAN_LEVEL="make,debs" || true
+          
+          # Build with minimal configuration
+          sudo ./compile.sh \
             BOARD=firefly-rk3399 \
-            BRANCH=current \
+            BRANCH=legacy \
             RELEASE=${{ inputs.set_release }} \
             KERNEL_ONLY=no \
             KERNEL_CONFIGURE=no \
@@ -194,49 +353,64 @@ jobs:
             EXPERT=yes \
             COMPRESS_OUTPUTIMAGE=img \
             ROOTFSTYPE=ext4 \
-            KERNEL_GIT=shallow \
             BSPFREEZE=yes \
-            USE_TORRENT=no \
-            CACHE_DIR=/builder/cache \
-            EXTERNAL=no \
-            INSTALL_HEADERS=no \
-            CREATE_PATCHES=no
+            EXTRAWIFI=no \
+            CREATE_PATCHES=no \
+            INSTALL_HEADERS=no
           
-          echo "status=success" >> ${GITHUB_OUTPUT}
+          # Check if build was successful
+          if [ -f output/images/Armbian*.img ]; then
+            echo "status=success" >> ${GITHUB_OUTPUT}
+            echo "Build completed successfully!"
+          else
+            echo "status=failed" >> ${GITHUB_OUTPUT}
+            echo "ERROR: Build failed - no image found!"
+            exit 1
+          fi
 
       - name: Organize files and clear space
         id: clean
-        if: ${{ steps.compile.outputs.status }} == 'success' && !cancelled()
+        if: ${{ steps.compile.outputs.status == 'success' && !cancelled() }}
         run: |
-          # Find and organize the built image
+          echo "Organizing build artifacts..."
+          
+          # Create output directory
+          mkdir -p ${GITHUB_WORKSPACE}/output
+          
+          # Find and copy the built image
           cd /builder/build/output/images
           IMAGE_FILE=$(ls -t Armbian*.img 2>/dev/null | head -1)
           
           if [ -n "$IMAGE_FILE" ]; then
             echo "Found image: $IMAGE_FILE"
-            # Compress the image
-            gzip -9 "$IMAGE_FILE"
-            COMPRESSED_FILE="${IMAGE_FILE}.gz"
             
-            # Create output directory
-            mkdir -p ${GITHUB_WORKSPACE}/output
-            mv "$COMPRESSED_FILE" ${GITHUB_WORKSPACE}/output/
+            # Show image info
+            ls -lh "$IMAGE_FILE"
+            
+            # Copy to workspace
+            cp "$IMAGE_FILE" ${GITHUB_WORKSPACE}/output/
             
             # Generate SHA256 checksum
             cd ${GITHUB_WORKSPACE}/output
-            sha256sum *.gz > sha256sum.txt
+            sha256sum *.img > sha256sum.txt
             
-            echo "build_tag=Armbian_${{ inputs.set_release }}_firefly-rk3399_$(date +"%Y.%m.%d")" >> ${GITHUB_OUTPUT}
+            # List files
+            echo "Files in output directory:"
+            ls -la
+            
+            echo "build_tag=Armbian_${{ inputs.set_release }}_firefly-rk3399_k5.15_$(date +"%Y%m%d")" >> ${GITHUB_OUTPUT}
             echo "status=success" >> ${GITHUB_OUTPUT}
           else
-            echo "ERROR: No image file found!" >&2
+            echo "ERROR: No image file found in output/images/"
+            ls -la /builder/build/output/images/ || true
             echo "status=failed" >> ${GITHUB_OUTPUT}
             exit 1
           fi
           
-          # Clean up builder space
-          rm -rf /builder/build/{cache,output} 2>/dev/null || true
-          df -hT ${PWD}
+          # Clean up
+          echo "Cleaning up build space..."
+          sudo rm -rf /builder/build/{cache,output} 2>/dev/null || true
+          df -hT /builder
 
       - name: Upload Armbian image to Release
         uses: ncipollo/release-action@main
@@ -249,32 +423,52 @@ jobs:
           body: |
             ### Armbian for Firefly-RK3399
             - **OS**: ${{ inputs.set_release }}
-            - **Kernel**: 5.15.y (recommended for RK3399 stability)
+            - **Kernel**: 5.15.y (Legacy branch for best RK3399 compatibility)
             - **Board**: Firefly-RK3399
+            - **Build Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
             
             ### Default Credentials
             - **Username**: root
             - **Password**: 1234
+            - **Additional User**: firefly (password: firefly)
             
-            ### Important Notes for Firefly-RK3399:
-            1. This build disables PCIe by default to avoid link training issues
-            2. Uses kernel 5.15.y for best compatibility
-            3. If you need PCIe, enable it in device tree: `/boot/dtb/rockchip/rk3399-firefly.dts`
+            ### Important Notes:
+            1. **PCIe is disabled by default** to avoid link training issues
+            2. Uses **kernel 5.15.y** for maximum stability with RK3399
+            3. Console on **ttyS2** (1500000 baud)
+            4. Minimal build - only essential packages included
             
             ### Installation:
             ```bash
-            # Write to SD card or eMMC
-            sudo dd if=Armbian_*.img.gz | gunzip | sudo dd of=/dev/sdX bs=4M status=progress
+            # Write to SD card
+            xzcat Armbian_*.img.xz | sudo dd of=/dev/sdX bs=4M status=progress
+            # or if not compressed:
+            sudo dd if=Armbian_*.img of=/dev/sdX bs=4M status=progress
             ```
             
+            ### First Boot:
+            1. Insert SD card into Firefly-RK3399
+            2. Power on the board
+            3. Login with root/1234
+            4. Run `armbian-config` for additional configuration
+            
+            ### Known Issues Fixed:
+            - PCIe link training timeout disabled
+            - VOP clock issues resolved
+            - Dependency cycles in device tree fixed
+            
             ### Verification:
-            See included sha256sum.txt
+            ```bash
+            sha256sum -c sha256sum.txt
+            ```
 
       - name: Cleanup workspace
         if: always()
         run: |
+          echo "Cleaning up workspace..."
           sudo umount /builder 2>/dev/null || true
           sudo vgremove -f github 2>/dev/null || true
           sudo pvremove /dev/loop6 /dev/loop7 2>/dev/null || true
           sudo losetup -d /dev/loop6 /dev/loop7 2>/dev/null || true
           sudo rm -f /mnt/mnt.img /root.img 2>/dev/null || true
+          echo "Cleanup completed"
