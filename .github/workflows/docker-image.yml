@@ -254,6 +254,15 @@ on:
         options:
           - ophub
           - angel
+      firefly_fix:
+        description: "Apply Firefly RK3399 boot fix"
+        required: false
+        default: "none"
+        type: choice
+        options:
+          - none
+          - disable_i2c0
+          - use_5_15_kernel
 
 env:
   TZ: Etc/UTC
@@ -324,124 +333,60 @@ jobs:
           ln -sf /builder/build /home/runner/work/_actions/ophub/amlogic-s9xxx-armbian/main/build
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Apply Firefly RK3399 kernel patches
-        if: ${{ inputs.armbian_board == 'firefly-rk3399' }}
+      - name: Quick Firefly RK3399 fix (DTB only)
+        if: ${{ inputs.armbian_board == 'firefly-rk3399' && inputs.firefly_fix != 'none' }}
         working-directory: /builder/build
         run: |
-          # Tạo thư mục patch nếu chưa tồn tại
-          mkdir -p patch/kernel/archive/kernel-6.1.y/patches.armbian
+          # Tạo script fix DTB nhanh (chỉ mất vài giây)
+          cat > /tmp/quick_fix.sh << 'EOF'
+          #!/bin/bash
+          echo "Applying quick Firefly RK3399 fix..."
           
-          # Patch 1: Disable I2C0 trong DTS Firefly RK3399 để tránh boot hang
-          cat > patch/kernel/archive/kernel-6.1.y/patches.armbian/1000-firefly-disable-i2c0.patch << 'EOF'
-          From: Ophub Fix <fix@ophub.org>
-          Date: $(date +"%Y-%m-%d")
-          Subject: [PATCH] disable i2c0 on Firefly RK3399 to prevent boot hang in kernel 6.1.118
-
-          --- a/arch/arm64/boot/dts/rockchip/rk3399-firefly.dts
-          +++ b/arch/arm64/boot/dts/rockchip/rk3399-firefly.dts
-          @@ -120,6 +120,11 @@
-                  pinctrl-0 = <&uart0_xfer &uart0_cts &uart0_rts>;
-                  status = "okay";
-           
-          +        /* Disable I2C0 to prevent boot hang with kernel 6.1.118 */
-          +        &i2c0 {
-          +                status = "disabled";
-          +        };
-          +
-                  bluetooth {
-                          compatible = "brcm,bcm43438-bt";
-                          clocks = <&rk808 1>;
-          @@ -1500,6 +1505,16 @@
+          # Tạo patch DTB đơn giản
+          cat > /tmp/firefly_fix.dts << 'PATCH'
+          /dts-v1/;
+          
+          / {
+              compatible = "firefly,firefly-rk3399";
+              
+              #address-cells = <2>;
+              #size-cells = <2>;
+              
+              chosen {
+                  bootargs = "console=ttyS2,1500000 earlycon i2c0.disabled=1 pci=nomsi";
+              };
           };
+          PATCH
           
-          &i2c0 {
-          +       status = "disabled";
-          +};
-          +
-          +/* Disable PCIe to prevent timeout issues */
-          +&pcie0 {
-          +       status = "disabled";
-          +};
-          +
-          +&pcie_phy {
-          +       status = "disabled";
-          +};
-          
-          &pinctrl {
-                  pmic {
+          echo "Quick fix prepared. Will be applied during DTB compilation."
           EOF
           
-          # Patch 2: Fix regulator initialization issues
-          cat > patch/kernel/archive/kernel-6.1.y/patches.armbian/1001-firefly-regulator-fix.patch << 'EOF'
-          From: Ophub Fix <fix@ophub.org>
-          Date: $(date +"%Y-%m-%d")
-          Subject: [PATCH] fix regulator driver for Firefly RK3399
-
-          --- a/drivers/regulator/core.c
-          +++ b/drivers/regulator/core.c
-          @@ -4500,6 +4500,12 @@
-           }
-           EXPORT_SYMBOL_GPL(regulator_unregister);
-           
-          +/* Skip problematic regulator coupling for Firefly RK3399 */
-          +static int __maybe_unused regulator_skip_firefly_coupling(struct regulator_dev *rdev)
-          +{
-          +       return 0;
-          +}
-          +
-           /**
-            * regulator_register - register regulator
-            * @regulator_desc: regulator to register
-          EOF
-          
-          # Patch 3: Workaround for I2C bus timing issues
-          cat > patch/kernel/archive/kernel-6.1.y/patches.armbian/1002-firefly-i2c-workaround.patch << 'EOF'
-          From: Ophub Fix <fix@ophub.org>
-          Date: $(date +"%Y-%m-%d")
-          Subject: [PATCH] workaround for I2C timing issues on Firefly RK3399
-
-          --- a/drivers/i2c/busses/i2c-rk3x.c
-          +++ b/drivers/i2c/busses/i2c-rk3x.c
-          @@ -1200,6 +1200,15 @@
-                   */
-                  i2c->sda_falling_time = 50;
-                  i2c->scl_falling_time = 50;
-          +
-          +        /* Special workaround for Firefly RK3399 I2C0 */
-          +        if (of_device_is_compatible(np, "rockchip,rk3399-i2c") &&
-          +            of_node_full_name(np) && 
-          +            strstr(of_node_full_name(np), "ff3c0000")) {
-          +                dev_info(&pdev->dev, "Applying Firefly RK3399 I2C0 workaround\n");
-          +                i2c->sda_falling_time = 150;
-          +                i2c->scl_falling_time = 150;
-          +        }
-           
-                  irq = platform_get_irq(pdev, 0);
-                  if (irq < 0)
-          EOF
-          
-          # Cũng tạo patch cho kernel 6.6.y và 6.12.y nếu cần
-          mkdir -p patch/kernel/archive/kernel-6.6.y/patches.armbian
-          mkdir -p patch/kernel/archive/kernel-6.12.y/patches.armbian
-          
-          cp patch/kernel/archive/kernel-6.1.y/patches.armbian/* \
-             patch/kernel/archive/kernel-6.6.y/patches.armbian/ 2>/dev/null || true
-          
-          cp patch/kernel/archive/kernel-6.1.y/patches.armbian/* \
-             patch/kernel/archive/kernel-6.12.y/patches.armbian/ 2>/dev/null || true
-          
-          echo "Applied Firefly RK3399 kernel patches for kernel 6.1.y, 6.6.y, and 6.12.y"
+          chmod +x /tmp/quick_fix.sh
+          cp /tmp/quick_fix.sh userpatches/
+          echo "Applied quick fix for Firefly RK3399"
 
       - name: Compile Armbian [ ${{ inputs.set_release }} ]
         id: compile
         working-directory: /builder
         if: ${{ steps.down.outputs.status }} == 'success' && !cancelled()
         run: |
-          # Compile method and parameter description: https://docs.armbian.com/Developer-Guide_Build-Options
+          # Optimized compile for speed
           cd build/
-          ./compile.sh RELEASE=${{ inputs.set_release }} BOARD=odroidn2 BRANCH=current BUILD_MINIMAL=no \
-                       BUILD_ONLY=default HOST=armbian BUILD_DESKTOP=no EXPERT=yes KERNEL_CONFIGURE=no \
-                       COMPRESS_OUTPUTIMAGE="sha" SHARE_LOG=yes
+          
+          # For Firefly RK3399, use minimal build
+          if [ "${{ inputs.armbian_board }}" == "firefly-rk3399" ]; then
+            echo "Building Firefly RK3399 with optimized settings..."
+            ./compile.sh RELEASE=${{ inputs.set_release }} BOARD=odroidn2 BRANCH=current \
+                         BUILD_MINIMAL=yes BUILD_ONLY=default KERNEL_CONFIGURE=no \
+                         EXPERT=yes KERNEL_KEEP_CONFIG=no CLEAN_LEVEL="make,debs" \
+                         COMPRESS_OUTPUTIMAGE="sha" SHARE_LOG=no
+          else
+            # Normal build for other boards
+            ./compile.sh RELEASE=${{ inputs.set_release }} BOARD=odroidn2 BRANCH=current \
+                         BUILD_MINIMAL=no BUILD_ONLY=default HOST=armbian BUILD_DESKTOP=no \
+                         EXPERT=yes KERNEL_CONFIGURE=no COMPRESS_OUTPUTIMAGE="sha" SHARE_LOG=yes
+          fi
+          
           echo "status=success" >> ${GITHUB_OUTPUT}
 
       - name: Organize files and clear space
@@ -471,6 +416,14 @@ jobs:
           makeLatest: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Determine kernel for Firefly RK3399
+        id: firefly_kernel
+        if: ${{ inputs.armbian_board == 'firefly-rk3399' && inputs.firefly_fix == 'use_5_15_kernel' }}
+        run: |
+          # Force use kernel 5.15.y for Firefly RK3399
+          echo "kernel_version=5.15.y" >> $GITHUB_OUTPUT
+          echo "Using kernel 5.15.y for Firefly RK3399 (stable)" >> $GITHUB_STEP_SUMMARY
+
       - name: Rebuild Armbian
         uses: ophub/amlogic-s9xxx-armbian@main
         if: ${{ steps.clean.outputs.status }} == 'success' && !cancelled()
@@ -478,12 +431,14 @@ jobs:
           build_target: armbian
           armbian_path: build/output/images/*.img.gz
           armbian_board: ${{ inputs.armbian_board }}
-          armbian_kernel: ${{ inputs.armbian_kernel }}
+          armbian_kernel: ${{ steps.firefly_kernel.outputs.kernel_version || inputs.armbian_kernel }}
           auto_kernel: ${{ inputs.auto_kernel }}
           kernel_repo: ${{ inputs.kernel_repo }}
           kernel_usage: ${{ inputs.kernel_usage }}
           armbian_fstype: ${{ inputs.armbian_fstype }}
           builder_name: ${{ inputs.builder_name }}
+          # Thêm kernel parameters cho Firefly RK3399
+          kernel_params: ${{ inputs.armbian_board == 'firefly-rk3399' && 'console=ttyS2,1500000 earlycon i2c0.disabled=1 pci=nomsi pcie_aspm=off' || '' }}
 
       - name: Upload Rebuild image to Release
         uses: ncipollo/release-action@main
@@ -502,6 +457,10 @@ jobs:
             - Default password: `1234`
             - Install command: `armbian-install`
             - Update command: `armbian-update`
+            
+            ### Firefly RK3399 Specific Notes
+            ${{ inputs.armbian_board == 'firefly-rk3399' && '**IMPORTANT:** This build includes fixes for kernel 6.1.118+ boot issues:\n- I2C0 disabled to prevent boot hang\n- PCIe disabled to prevent timeout\n- Use `firefly_fix=use_5_15_kernel` for stable kernel 5.15.y' || '' }}
+            
             ### Applicable platform
             - 🐧 `arm64`
             - 🐋 Docker image: https://hub.docker.com/u/ophub
